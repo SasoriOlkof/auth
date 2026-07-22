@@ -157,6 +157,8 @@ func (a *API) handleOAuthCallback(r *http.Request) (*OAuthProviderData, error) {
 	case TwitterProvider:
 		// future OAuth1.0 providers will use this method
 		oAuthResponseData, err = a.oAuth1Callback(ctx, providerType)
+	case SteamProvider:
+		oAuthResponseData, err = a.steamCallback(ctx, r, providerType)
 	default:
 		oAuthResponseData, err = a.oAuthCallback(ctx, r, providerType)
 	}
@@ -677,6 +679,11 @@ func (a *API) Provider(ctx context.Context, name string, scopes string) (provide
 	case SlackOIDCProvider:
 		pConfig = config.External.SlackOIDC
 		p, err = provider.NewSlackOIDCProvider(pConfig, scopes)
+	case SteamProvider:
+		pConfig = config.External.Steam.OAuthProviderConfiguration
+		// Steam's OpenID 2.0 flow never returns an email address
+		pConfig.EmailOptional = true
+		p, err = provider.NewSteamProvider(config.External.Steam)
 	case TwitchProvider:
 		pConfig = config.External.Twitch
 		p, err = provider.NewTwitchProvider(pConfig, scopes)

@@ -25,6 +25,7 @@ const (
 	SlackOIDCProvider         = "slack_oidc"
 	SnapchatProvider          = "snapchat"
 	SpotifyProvider           = "spotify"
+	SteamProvider             = "steam"
 	TwitchProvider            = "twitch"
 	TwitterProvider           = "twitter"
 	VercelMarketplaceProvider = "vercel_marketplace"
