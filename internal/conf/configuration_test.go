@@ -818,6 +818,39 @@ func TestMethods(t *testing.T) {
 	}
 
 	{
+		val := &SteamProviderConfiguration{}
+
+		err := val.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "provider is not enabled")
+
+		val.Enabled = true
+		err = val.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "missing redirect URI")
+
+		// no client ID and no secret required for plain Steam login
+		val.RedirectURI = "http://localhost:9999/callback"
+		err = val.Validate()
+		require.NoError(t, err)
+
+		// the required app ID must be numeric and needs the Web API key
+		val.RequiredAppID = "notanumber"
+		err = val.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "must be numeric")
+
+		val.RequiredAppID = "440"
+		err = val.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "missing Steam Web API key")
+
+		val.Secret = "webapikey"
+		err = val.Validate()
+		require.NoError(t, err)
+	}
+
+	{
 		val := &GlobalConfiguration{}
 		err := val.ApplyDefaults()
 		require.Error(t, err)

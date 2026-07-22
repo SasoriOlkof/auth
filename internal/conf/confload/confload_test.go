@@ -10,6 +10,28 @@ import (
 	"github.com/supabase/auth/internal/conf"
 )
 
+// TestSteamProviderConfig verifies that envconfig flattens the embedded
+// OAuthProviderConfiguration in SteamProviderConfiguration, so the standard
+// GOTRUE_EXTERNAL_STEAM_* variables load next to the Steam-specific ones.
+func TestSteamProviderConfig(t *testing.T) {
+	os.Setenv("GOTRUE_SITE_URL", "http://localhost:8080")
+	os.Setenv("GOTRUE_DB_DRIVER", "postgres")
+	os.Setenv("GOTRUE_DB_DATABASE_URL", "fake")
+	os.Setenv("GOTRUE_JWT_SECRET", "secret")
+	os.Setenv("API_EXTERNAL_URL", "http://localhost:9999")
+	os.Setenv("GOTRUE_EXTERNAL_STEAM_ENABLED", "true")
+	os.Setenv("GOTRUE_EXTERNAL_STEAM_SECRET", "webapikey")
+	os.Setenv("GOTRUE_EXTERNAL_STEAM_REDIRECT_URI", "http://localhost:9999/callback")
+	os.Setenv("GOTRUE_EXTERNAL_STEAM_REQUIRED_APP_ID", "440")
+
+	gc, err := LoadGlobal("")
+	require.NoError(t, err)
+	assert.Equal(t, true, gc.External.Steam.Enabled)
+	assert.Equal(t, "webapikey", gc.External.Steam.Secret)
+	assert.Equal(t, "http://localhost:9999/callback", gc.External.Steam.RedirectURI)
+	assert.Equal(t, "440", gc.External.Steam.RequiredAppID)
+}
+
 func TestGlobal(t *testing.T) {
 	os.Setenv("GOTRUE_SITE_URL", "http://localhost:8080")
 	os.Setenv("GOTRUE_DB_DRIVER", "postgres")

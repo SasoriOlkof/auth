@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -590,6 +591,7 @@ type ProviderConfiguration struct {
 	Spotify                 OAuthProviderConfiguration     `json:"spotify"`
 	Slack                   OAuthProviderConfiguration     `json:"slack"`
 	SlackOIDC               OAuthProviderConfiguration     `json:"slack_oidc" envconfig:"SLACK_OIDC"`
+	Steam                   SteamProviderConfiguration     `json:"steam"`
 	Twitter                 OAuthProviderConfiguration     `json:"twitter"`
 	Twitch                  OAuthProviderConfiguration     `json:"twitch"`
 	VercelMarketplace       OAuthProviderConfiguration     `json:"vercel_marketplace" split_words:"true"`
@@ -608,6 +610,16 @@ type ProviderConfiguration struct {
 
 	Web3Solana   SolanaConfiguration   `json:"web3_solana" split_words:"true"`
 	Web3Ethereum EthereumConfiguration `json:"web3_ethereum" split_words:"true"`
+}
+
+// SteamProviderConfiguration holds the configuration for the Steam provider.
+// Steam uses OpenID 2.0 rather than OAuth2: ClientID is unused and Secret
+// holds an optional Steam Web API key used to enrich the user profile.
+type SteamProviderConfiguration struct {
+	OAuthProviderConfiguration
+	// RequiredAppID, if set, rejects logins from Steam accounts that do not
+	// own the given app (checked via IPlayerService/GetOwnedGames).
+	RequiredAppID string `json:"required_app_id,omitempty" split_words:"true"`
 }
 
 type SolanaConfiguration struct {
@@ -1413,6 +1425,27 @@ func (o *OAuthProviderConfiguration) ValidateOAuth() error {
 	}
 	if o.RedirectURI == "" {
 		return errors.New("missing redirect URI")
+	}
+	return nil
+}
+
+// Validate checks the Steam provider configuration. Unlike ValidateOAuth it
+// does not require a client ID (Steam's OpenID 2.0 flow has none) and the
+// Web API key (Secret) is only required when RequiredAppID is set.
+func (s *SteamProviderConfiguration) Validate() error {
+	if !s.Enabled {
+		return errors.New("provider is not enabled")
+	}
+	if s.RedirectURI == "" {
+		return errors.New("missing redirect URI")
+	}
+	if s.RequiredAppID != "" {
+		if _, err := strconv.ParseUint(s.RequiredAppID, 10, 64); err != nil {
+			return errors.New("required app ID must be numeric")
+		}
+		if s.Secret == "" {
+			return errors.New("missing Steam Web API key (secret), required when required app ID is set")
+		}
 	}
 	return nil
 }
