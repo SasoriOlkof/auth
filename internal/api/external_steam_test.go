@@ -1,12 +1,10 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 
 	"github.com/supabase/auth/internal/models"
 )
@@ -54,7 +52,7 @@ func SteamTestSetup(ts *ExternalTestSuite, verifyCount *int, userCount *int, isV
 			fmt.Fprintf(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:%v\n", isValid)
 		case "/ISteamUser/GetPlayerSummaries/v2/":
 			*userCount++
-			ts.Equal("testapikey", r.URL.Query().Get("key"))
+			ts.Equal("testpublisherkey", r.URL.Query().Get("key"))
 			ts.Equal(steamTestID, r.URL.Query().Get("steamids"))
 			w.Header().Add("Content-Type", "application/json")
 			fmt.Fprint(w, player)
@@ -145,14 +143,14 @@ func (ts *ExternalTestSuite) TestSignupExternalSteamDisableSignupSuccessWithExis
 	assertAuthorizationSuccess(ts, u, verifyCount, userCount, "", "Steam User", steamTestID, "http://example.com/avatar_full.jpg")
 }
 
-func (ts *ExternalTestSuite) TestSignupExternalSteam_MinimalProfileWithoutAPIKey() {
+func (ts *ExternalTestSuite) TestSignupExternalSteam_MinimalProfileWithoutPublisherKey() {
 	verifyCount, userCount := 0, 0
 	server := SteamTestSetup(ts, &verifyCount, &userCount, true, steamTestPlayer)
 	defer server.Close()
 
-	apiKey := ts.Config.External.Steam.Secret
-	ts.Config.External.Steam.Secret = ""
-	defer func() { ts.Config.External.Steam.Secret = apiKey }()
+	publisherKey := ts.Config.External.Steam.PublisherKey
+	ts.Config.External.Steam.PublisherKey = ""
+	defer func() { ts.Config.External.Steam.PublisherKey = publisherKey }()
 
 	u := performSteamAuthorization(ts, nil)
 	ts.Require().Equal("/admin", u.Path)
@@ -161,7 +159,7 @@ func (ts *ExternalTestSuite) TestSignupExternalSteam_MinimalProfileWithoutAPIKey
 	ts.Require().NoError(err)
 	ts.NotEmpty(v.Get("access_token"))
 	ts.Equal(1, verifyCount)
-	ts.Equal(0, userCount, "the Steam Web API must not be called without an API key")
+	ts.Equal(0, userCount, "the Steam Web API must not be called without a publisher key")
 
 	identity := &models.Identity{}
 	ts.Require().NoError(ts.API.db.Q().Where("provider_id = ?", steamTestID).First(identity))
@@ -346,39 +344,25 @@ func (ts *ExternalTestSuite) TestSignupExternalSteam_PKCE() {
 	ts.Equal(1, verifyCount)
 }
 
-// SteamOwnershipTestSetup extends the fake Steam server with the
-// IPlayerService/GetOwnedGames endpoint used by the RequiredAppID gate.
-func SteamOwnershipTestSetup(ts *ExternalTestSuite, verifyCount *int, ownedGames string, ownedGamesStatus int) *httptest.Server {
+// SteamPublisherTestSetup fakes the CheckAppOwnership endpoint used when the
+// publisher API is enabled. ownershipBody is the JSON returned; passing an
+// empty string with a non-200 status simulates an API outage.
+func SteamPublisherTestSetup(ts *ExternalTestSuite, verifyCount *int, ownershipBody string, ownershipStatus int) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/openid/login":
 			*verifyCount++
 			fmt.Fprint(w, "ns:http://specs.openid.net/auth/2.0\nis_valid:true\n")
-		case "/IPlayerService/GetOwnedGames/v1/":
-			ts.Equal("testapikey", r.URL.Query().Get("key"))
-			// Service interfaces take their arguments as a single JSON object:
-			// steamid as uint64 and appids_filter as an array of integers,
-			// exactly as the Steam Web API documents them.
-			var input struct {
-				SteamID                json.Number   `json:"steamid"`
-				AppIDsFilter           []json.Number `json:"appids_filter"`
-				IncludePlayedFreeGames bool          `json:"include_played_free_games"`
-			}
-			dec := json.NewDecoder(strings.NewReader(r.URL.Query().Get("input_json")))
-			dec.UseNumber()
-			ts.Require().NoError(dec.Decode(&input), "input_json must be valid JSON")
-			ts.Equal(steamTestID, input.SteamID.String())
-			ts.NotContains(r.URL.Query().Get("input_json"), `"`+steamTestID+`"`, "steamid must be a JSON number, not a string")
-			ts.Require().Len(input.AppIDsFilter, 1)
-			ts.Equal("440", input.AppIDsFilter[0].String())
-			ts.NotContains(r.URL.Query().Get("input_json"), `"440"`, "appids_filter must contain JSON numbers, not strings")
-			ts.True(input.IncludePlayedFreeGames)
-			if ownedGamesStatus != http.StatusOK {
-				w.WriteHeader(ownedGamesStatus)
+		case "/ISteamUser/CheckAppOwnership/v4/":
+			ts.Equal("testpublisherkey", r.URL.Query().Get("key"))
+			ts.Equal(steamTestID, r.URL.Query().Get("steamid"))
+			ts.Equal("440", r.URL.Query().Get("appid"))
+			if ownershipStatus != http.StatusOK {
+				w.WriteHeader(ownershipStatus)
 				return
 			}
 			w.Header().Add("Content-Type", "application/json")
-			fmt.Fprint(w, ownedGames)
+			fmt.Fprint(w, ownershipBody)
 		case "/ISteamUser/GetPlayerSummaries/v2/":
 			w.Header().Add("Content-Type", "application/json")
 			fmt.Fprint(w, steamTestPlayer)
@@ -394,13 +378,34 @@ func SteamOwnershipTestSetup(ts *ExternalTestSuite, verifyCount *int, ownedGames
 	return server
 }
 
-func (ts *ExternalTestSuite) TestSignupExternalSteam_RequiredAppOwned() {
-	verifyCount := 0
-	server := SteamOwnershipTestSetup(ts, &verifyCount, `{"response":{"game_count":1,"games":[{"appid":440}]}}`, http.StatusOK)
-	defer server.Close()
-
+// enablePublisherGate configures the ownership gate and returns a cleanup
+// function that restores the previous config. The publisher key itself comes
+// from the test environment.
+func (ts *ExternalTestSuite) enablePublisherGate(requirePermanent bool) func() {
 	ts.Config.External.Steam.RequiredAppID = "440"
-	defer func() { ts.Config.External.Steam.RequiredAppID = "" }()
+	ts.Config.External.Steam.RequirePermanent = requirePermanent
+	return func() {
+		ts.Config.External.Steam.RequiredAppID = ""
+		ts.Config.External.Steam.RequirePermanent = false
+	}
+}
+
+// object-shaped appownership response
+const steamOwnsPermanent = `{"appownership":{"ownsapp":true,"permanent":true,"ownersteamid":"76561197960287930","sitelicense":false}}`
+
+// array-shaped appownership response (a different API version)
+const steamOwnsPermanentArray = `{"appownership":{"apps":[{"appid":440,"ownsapp":true,"permanent":true,"ownersteamid":"76561197960287930","sitelicense":false}]}}`
+
+// active but temporary access (e.g. Family Sharing / free weekend)
+const steamOwnsTemporary = `{"appownership":{"ownsapp":true,"permanent":false,"ownersteamid":"76561197960287931","sitelicense":false}}`
+
+const steamDoesNotOwn = `{"appownership":{"ownsapp":false,"permanent":false,"sitelicense":false}}`
+
+func (ts *ExternalTestSuite) TestSignupExternalSteam_PublisherPermanentOwned() {
+	verifyCount := 0
+	server := SteamPublisherTestSetup(ts, &verifyCount, steamOwnsPermanent, http.StatusOK)
+	defer server.Close()
+	defer ts.enablePublisherGate(true)()
 
 	u := performSteamAuthorization(ts, nil)
 	ts.Require().Equal("/admin", u.Path)
@@ -411,13 +416,28 @@ func (ts *ExternalTestSuite) TestSignupExternalSteam_RequiredAppOwned() {
 	ts.Equal(1, verifyCount)
 }
 
-func (ts *ExternalTestSuite) TestSignupExternalSteam_RequiredAppNotOwned() {
+// The array-shaped response variant must be parsed identically.
+func (ts *ExternalTestSuite) TestSignupExternalSteam_PublisherArrayResponse() {
 	verifyCount := 0
-	server := SteamOwnershipTestSetup(ts, &verifyCount, `{"response":{"game_count":0,"games":[]}}`, http.StatusOK)
+	server := SteamPublisherTestSetup(ts, &verifyCount, steamOwnsPermanentArray, http.StatusOK)
 	defer server.Close()
+	defer ts.enablePublisherGate(true)()
 
-	ts.Config.External.Steam.RequiredAppID = "440"
-	defer func() { ts.Config.External.Steam.RequiredAppID = "" }()
+	u := performSteamAuthorization(ts, nil)
+	ts.Require().Equal("/admin", u.Path)
+
+	v, err := url.ParseQuery(u.Fragment)
+	ts.Require().NoError(err)
+	ts.NotEmpty(v.Get("access_token"))
+}
+
+// With RequirePermanent, temporary access (Family Sharing / free weekend) is
+// rejected even though ownsapp is true.
+func (ts *ExternalTestSuite) TestSignupExternalSteam_PublisherTemporaryRejectedWhenPermanentRequired() {
+	verifyCount := 0
+	server := SteamPublisherTestSetup(ts, &verifyCount, steamOwnsTemporary, http.StatusOK)
+	defer server.Close()
+	defer ts.enablePublisherGate(true)()
 
 	u := performSteamAuthorization(ts, nil)
 
@@ -425,13 +445,38 @@ func (ts *ExternalTestSuite) TestSignupExternalSteam_RequiredAppNotOwned() {
 	ts.Equal(1, verifyCount)
 }
 
-func (ts *ExternalTestSuite) TestSignupExternalSteam_RequiredAppCheckFailsClosed() {
+// Without RequirePermanent, temporary access is accepted.
+func (ts *ExternalTestSuite) TestSignupExternalSteam_PublisherTemporaryAcceptedWhenPermanentNotRequired() {
 	verifyCount := 0
-	server := SteamOwnershipTestSetup(ts, &verifyCount, "", http.StatusInternalServerError)
+	server := SteamPublisherTestSetup(ts, &verifyCount, steamOwnsTemporary, http.StatusOK)
 	defer server.Close()
+	defer ts.enablePublisherGate(false)()
 
-	ts.Config.External.Steam.RequiredAppID = "440"
-	defer func() { ts.Config.External.Steam.RequiredAppID = "" }()
+	u := performSteamAuthorization(ts, nil)
+	ts.Require().Equal("/admin", u.Path)
+
+	v, err := url.ParseQuery(u.Fragment)
+	ts.Require().NoError(err)
+	ts.NotEmpty(v.Get("access_token"))
+}
+
+func (ts *ExternalTestSuite) TestSignupExternalSteam_PublisherNotOwned() {
+	verifyCount := 0
+	server := SteamPublisherTestSetup(ts, &verifyCount, steamDoesNotOwn, http.StatusOK)
+	defer server.Close()
+	defer ts.enablePublisherGate(true)()
+
+	u := performSteamAuthorization(ts, nil)
+
+	assertAuthorizationFailure(ts, u, "Steam account does not own the required app", "access_denied", "")
+	ts.Equal(1, verifyCount)
+}
+
+func (ts *ExternalTestSuite) TestSignupExternalSteam_PublisherFailsClosed() {
+	verifyCount := 0
+	server := SteamPublisherTestSetup(ts, &verifyCount, "", http.StatusInternalServerError)
+	defer server.Close()
+	defer ts.enablePublisherGate(true)()
 
 	u := performSteamAuthorization(ts, nil)
 

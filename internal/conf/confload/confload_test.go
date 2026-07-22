@@ -20,16 +20,18 @@ func TestSteamProviderConfig(t *testing.T) {
 	os.Setenv("GOTRUE_JWT_SECRET", "secret")
 	os.Setenv("API_EXTERNAL_URL", "http://localhost:9999")
 	os.Setenv("GOTRUE_EXTERNAL_STEAM_ENABLED", "true")
-	os.Setenv("GOTRUE_EXTERNAL_STEAM_SECRET", "webapikey")
+	os.Setenv("GOTRUE_EXTERNAL_STEAM_PUBLISHER_KEY", "publisherkey")
 	os.Setenv("GOTRUE_EXTERNAL_STEAM_REDIRECT_URI", "http://localhost:9999/callback")
 	os.Setenv("GOTRUE_EXTERNAL_STEAM_REQUIRED_APP_ID", "440")
 
 	gc, err := LoadGlobal("")
 	require.NoError(t, err)
 	assert.Equal(t, true, gc.External.Steam.Enabled)
-	assert.Equal(t, "webapikey", gc.External.Steam.Secret)
+	assert.Equal(t, "publisherkey", gc.External.Steam.PublisherKey)
 	assert.Equal(t, "http://localhost:9999/callback", gc.External.Steam.RedirectURI)
 	assert.Equal(t, "440", gc.External.Steam.RequiredAppID)
+	// RequirePermanent defaults to false when unset.
+	assert.Equal(t, false, gc.External.Steam.RequirePermanent)
 }
 
 func TestGlobal(t *testing.T) {
