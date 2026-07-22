@@ -613,13 +613,23 @@ type ProviderConfiguration struct {
 }
 
 // SteamProviderConfiguration holds the configuration for the Steam provider.
-// Steam uses OpenID 2.0 rather than OAuth2: ClientID is unused and Secret
-// holds an optional Steam Web API key used to enrich the user profile.
+// Steam uses OpenID 2.0 rather than OAuth2, so ClientID and Secret from the
+// embedded OAuthProviderConfiguration are unused; a publisher Web API key is
+// configured via PublisherKey instead.
 type SteamProviderConfiguration struct {
 	OAuthProviderConfiguration
+	// PublisherKey is a Steam publisher Web API key that owns RequiredAppID. It
+	// is used on the partner host for both authoritative ownership via
+	// ISteamUser/CheckAppOwnership and profile enrichment. Optional unless
+	// RequiredAppID is set.
+	PublisherKey string `json:"publisher_key,omitempty" split_words:"true"`
 	// RequiredAppID, if set, rejects logins from Steam accounts that do not
-	// own the given app (checked via IPlayerService/GetOwnedGames).
+	// own the given app.
 	RequiredAppID string `json:"required_app_id,omitempty" split_words:"true"`
+	// RequirePermanent requires genuine permanent ownership (excludes Family
+	// Sharing, free weekends and PC cafés). Defaults to false, so any active
+	// license is accepted.
+	RequirePermanent bool `json:"require_permanent,omitempty" split_words:"true"`
 }
 
 type SolanaConfiguration struct {
@@ -1430,8 +1440,8 @@ func (o *OAuthProviderConfiguration) ValidateOAuth() error {
 }
 
 // Validate checks the Steam provider configuration. Unlike ValidateOAuth it
-// does not require a client ID (Steam's OpenID 2.0 flow has none) and the
-// Web API key (Secret) is only required when RequiredAppID is set.
+// does not require a client ID (Steam's OpenID 2.0 flow has none); a publisher
+// Web API key is only required when RequiredAppID is set.
 func (s *SteamProviderConfiguration) Validate() error {
 	if !s.Enabled {
 		return errors.New("provider is not enabled")
@@ -1443,8 +1453,8 @@ func (s *SteamProviderConfiguration) Validate() error {
 		if _, err := strconv.ParseUint(s.RequiredAppID, 10, 64); err != nil {
 			return errors.New("required app ID must be numeric")
 		}
-		if s.Secret == "" {
-			return errors.New("missing Steam Web API key (secret), required when required app ID is set")
+		if s.PublisherKey == "" {
+			return errors.New("missing Steam publisher Web API key, required when required app ID is set")
 		}
 	}
 	return nil
