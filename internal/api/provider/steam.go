@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -19,12 +18,12 @@ import (
 )
 
 const (
-	defaultSteamCommunityBase = "steamcommunity.com"
-	defaultSteamAPIBase       = "api.steampowered.com"
+	defaultSteamCommunityBase  = "steamcommunity.com"
+	defaultSteamPartnerAPIBase = "partner.steam-api.com"
 
-	steamOpenIDPath          = "/openid/login"
-	steamPlayerSummariesPath = "/ISteamUser/GetPlayerSummaries/v2/"
-	steamOwnedGamesPath      = "/IPlayerService/GetOwnedGames/v1/"
+	steamOpenIDPath            = "/openid/login"
+	steamPlayerSummariesPath   = "/ISteamUser/GetPlayerSummaries/v2/"
+	steamCheckAppOwnershipPath = "/ISteamUser/CheckAppOwnership/v4/"
 
 	steamOpenIDNS         = "http://specs.openid.net/auth/2.0"
 	steamIdentifierSelect = "http://specs.openid.net/auth/2.0/identifier_select"
@@ -48,11 +47,16 @@ var steamClaimedIDRegexp = regexp.MustCompile(`^https?://steamcommunity\.com/ope
 // the callback is verified server-side with a check_authentication round trip.
 // It intentionally implements only the Provider interface, not OAuthProvider.
 type SteamProvider struct {
-	OpenIDURL     string
-	APIURL        string
-	APIKey        string
+	OpenIDURL       string
+	PublisherAPIURL string
+	// PublisherKey is a Steam publisher Web API key that owns RequiredAppID,
+	// used on the partner host for both ownership and profile enrichment.
+	PublisherKey  string
 	CallbackURL   string
 	RequiredAppID string
+	// RequirePermanent requires genuine permanent ownership (excludes Family
+	// Sharing, free weekends and PC cafés).
+	RequirePermanent bool
 }
 
 type steamPlayer struct {
@@ -70,13 +74,19 @@ type steamPlayerSummariesResponse struct {
 	} `json:"response"`
 }
 
-type steamOwnedGamesResponse struct {
-	Response struct {
-		GameCount int `json:"game_count"`
-		Games     []struct {
-			AppID uint64 `json:"appid"`
-		} `json:"games"`
-	} `json:"response"`
+// steamAppOwnership is a single CheckAppOwnership record. appid is only present
+// in the array-shaped response variant.
+type steamAppOwnership struct {
+	AppID     json.Number `json:"appid"`
+	OwnsApp   bool        `json:"ownsapp"`
+	Permanent bool        `json:"permanent"`
+}
+
+// steamCheckAppOwnershipResponse defers decoding of the appownership value
+// because Steam has returned it both as a single object and as an object
+// wrapping an "apps" array across API versions.
+type steamCheckAppOwnershipResponse struct {
+	AppOwnership json.RawMessage `json:"appownership"`
 }
 
 // NewSteamProvider creates a Steam provider using OpenID 2.0.
@@ -86,11 +96,14 @@ func NewSteamProvider(ext conf.SteamProviderConfiguration) (*SteamProvider, erro
 	}
 
 	return &SteamProvider{
-		OpenIDURL:     chooseHost(ext.URL, defaultSteamCommunityBase) + steamOpenIDPath,
-		APIURL:        chooseHost(ext.ApiURL, defaultSteamAPIBase),
-		APIKey:        ext.Secret,
-		CallbackURL:   ext.RedirectURI,
-		RequiredAppID: ext.RequiredAppID,
+		OpenIDURL: chooseHost(ext.URL, defaultSteamCommunityBase) + steamOpenIDPath,
+		// Publisher methods live on the partner host in production; tests
+		// override ext.ApiURL so it points at the fake server.
+		PublisherAPIURL:  chooseHost(ext.ApiURL, defaultSteamPartnerAPIBase),
+		PublisherKey:     ext.PublisherKey,
+		CallbackURL:      ext.RedirectURI,
+		RequiredAppID:    ext.RequiredAppID,
+		RequirePermanent: ext.RequirePermanent,
 	}, nil
 }
 
@@ -222,54 +235,67 @@ func (p *SteamProvider) checkAuthentication(ctx context.Context, params url.Valu
 }
 
 // OwnsRequiredApp reports whether the given Steam account owns the configured
-// RequiredAppID, using IPlayerService/GetOwnedGames. Callers should treat
-// errors as a failed check (fail-closed) since this is an authorization gate.
-// Note that a private game library is indistinguishable from not owning the
-// app: Steam returns an empty list in both cases.
+// RequiredAppID, using ISteamUser/CheckAppOwnership on the partner host. It is
+// authoritative (ignores library privacy) and distinguishes genuine permanent
+// ownership from temporary access (Family Sharing, free weekends, PC cafés)
+// via the permanent flag. Callers should treat errors as a failed check
+// (fail-closed) since this is an authorization gate.
 func (p *SteamProvider) OwnsRequiredApp(ctx context.Context, steamID string) (bool, error) {
-	// GetOwnedGames is a Service interface: all arguments except the key are
-	// passed as a single JSON object in input_json, with steamid as uint64
-	// and appids_filter as an array of uint32.
-	steamIDNum, err := strconv.ParseUint(steamID, 10, 64)
-	if err != nil {
-		return false, fmt.Errorf("steam: invalid steamid %q: %w", steamID, err)
-	}
-	appID, err := strconv.ParseUint(p.RequiredAppID, 10, 32)
-	if err != nil {
-		return false, fmt.Errorf("steam: invalid required app ID %q: %w", p.RequiredAppID, err)
-	}
-
-	inputJSON, err := json.Marshal(map[string]interface{}{
-		"steamid":                   steamIDNum,
-		"appids_filter":             []uint64{appID},
-		"include_played_free_games": true,
-	})
-	if err != nil {
-		return false, err
-	}
-
 	v := url.Values{}
-	v.Set("key", p.APIKey)
-	v.Set("input_json", string(inputJSON))
+	v.Set("key", p.PublisherKey)
+	v.Set("steamid", steamID)
+	v.Set("appid", p.RequiredAppID)
 
-	var result steamOwnedGamesResponse
-	if err := p.getJSON(ctx, p.APIURL+steamOwnedGamesPath+"?"+v.Encode(), &result); err != nil {
+	var resp steamCheckAppOwnershipResponse
+	if err := p.getJSON(ctx, p.PublisherAPIURL+steamCheckAppOwnershipPath+"?"+v.Encode(), &resp); err != nil {
 		return false, err
 	}
 
-	for _, game := range result.Response.Games {
-		if game.AppID == appID {
-			return true, nil
-		}
+	ownership, err := p.parseAppOwnership(resp.AppOwnership)
+	if err != nil {
+		return false, err
 	}
-	return false, nil
+
+	if p.RequirePermanent {
+		return ownership.Permanent, nil
+	}
+	return ownership.OwnsApp, nil
+}
+
+// parseAppOwnership decodes the appownership value, which Steam has returned
+// both as a single object and as an object wrapping an "apps" array. In the
+// array form the entry matching RequiredAppID is selected.
+func (p *SteamProvider) parseAppOwnership(raw json.RawMessage) (steamAppOwnership, error) {
+	if len(raw) == 0 {
+		return steamAppOwnership{}, errors.New("steam: empty appownership in CheckAppOwnership response")
+	}
+
+	var arrForm struct {
+		Apps []steamAppOwnership `json:"apps"`
+	}
+	if err := json.Unmarshal(raw, &arrForm); err == nil && arrForm.Apps != nil {
+		for _, app := range arrForm.Apps {
+			if app.AppID.String() == p.RequiredAppID {
+				return app, nil
+			}
+		}
+		// The array was returned but did not include the requested app.
+		return steamAppOwnership{}, nil
+	}
+
+	var single steamAppOwnership
+	if err := json.Unmarshal(raw, &single); err != nil {
+		return steamAppOwnership{}, fmt.Errorf("steam: could not decode appownership: %w", err)
+	}
+	return single, nil
 }
 
 // GetUserProfile builds the user data for a verified SteamID. Steam never
-// returns an email address. Profile enrichment through the Steam Web API is
-// best effort: when no API key is configured or the request fails, a minimal
-// profile derived from the SteamID alone is returned instead of an error,
-// since authentication was already established by the OpenID assertion.
+// returns an email address. Profile enrichment via GetPlayerSummaries on the
+// partner host is best effort: when no publisher key is configured or the
+// request fails, a minimal profile derived from the SteamID alone is returned
+// instead of an error, since authentication was already established by the
+// OpenID assertion.
 func (p *SteamProvider) GetUserProfile(ctx context.Context, steamID string) *UserProvidedData {
 	data := &UserProvidedData{
 		Metadata: &Claims{
@@ -285,16 +311,16 @@ func (p *SteamProvider) GetUserProfile(ctx context.Context, steamID string) *Use
 		},
 	}
 
-	if p.APIKey == "" {
+	if p.PublisherKey == "" {
 		return data
 	}
 
 	v := url.Values{}
-	v.Set("key", p.APIKey)
+	v.Set("key", p.PublisherKey)
 	v.Set("steamids", steamID)
 
 	var summaries steamPlayerSummariesResponse
-	err := p.getJSON(ctx, p.APIURL+steamPlayerSummariesPath+"?"+v.Encode(), &summaries)
+	err := p.getJSON(ctx, p.PublisherAPIURL+steamPlayerSummariesPath+"?"+v.Encode(), &summaries)
 	if err == nil && len(summaries.Response.Players) == 0 {
 		err = errors.New("steam: player summaries response contained no players")
 	}

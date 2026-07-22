@@ -843,9 +843,9 @@ func TestMethods(t *testing.T) {
 		val.RequiredAppID = "440"
 		err = val.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "missing Steam Web API key")
+		require.Contains(t, err.Error(), "missing Steam publisher Web API key")
 
-		val.Secret = "webapikey"
+		val.PublisherKey = "publisherkey"
 		err = val.Validate()
 		require.NoError(t, err)
 	}
