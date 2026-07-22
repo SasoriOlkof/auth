@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -174,6 +175,49 @@ func (a *API) oAuth1Callback(ctx context.Context, providerType string) (*OAuthPr
 		refreshToken: "",
 	}, nil
 
+}
+
+// steamCallback verifies the OpenID 2.0 positive assertion returned by Steam
+// and builds the provider data from the verified SteamID. Steam has no OAuth
+// tokens, so token and refreshToken are always empty.
+func (a *API) steamCallback(ctx context.Context, r *http.Request, providerType string) (*OAuthProviderData, error) {
+	var rq url.Values
+	if err := r.ParseForm(); r.Method == http.MethodPost && err == nil {
+		rq = r.Form
+	} else {
+		rq = r.URL.Query()
+	}
+
+	providerCandidate, _, err := a.Provider(ctx, providerType, "")
+	if err != nil {
+		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeOAuthProviderNotSupported, "Unsupported provider: %+v", err).WithInternalError(err)
+	}
+	steamProvider, ok := providerCandidate.(*provider.SteamProvider)
+	if !ok {
+		return nil, apierrors.NewInternalServerError("Provider steam is misconfigured")
+	}
+
+	steamID, err := steamProvider.VerifyAssertion(ctx, rq)
+	if err != nil {
+		if errors.Is(err, provider.ErrSteamOpenIDCancelled) {
+			return nil, apierrors.NewOAuthError("access_denied", "OpenID authentication cancelled by user")
+		}
+		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeBadOAuthCallback, "OpenID verification failed").WithInternalError(err)
+	}
+
+	if steamProvider.RequiredAppID != "" {
+		owns, err := steamProvider.OwnsRequiredApp(ctx, steamID)
+		if err != nil {
+			return nil, apierrors.NewInternalServerError("Error verifying app ownership with external provider").WithInternalError(err)
+		}
+		if !owns {
+			return nil, apierrors.NewOAuthError("access_denied", "Steam account does not own the required app")
+		}
+	}
+
+	return &OAuthProviderData{
+		userData: steamProvider.GetUserProfile(ctx, steamID),
+	}, nil
 }
 
 // OAuthProvider returns the corresponding oauth provider as an OAuthProvider interface

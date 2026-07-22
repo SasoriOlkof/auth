@@ -433,7 +433,7 @@ The default group to assign all new users to.
 
 ### External Authentication Providers
 
-We support `apple`, `azure`, `bitbucket`, `discord`, `facebook`, `figma`, `github`, `gitlab`, `google`, `keycloak`, `linkedin`, `notion`, `snapchat`, `spotify`, `slack`, `twitch`, `twitter` and `workos` for external authentication.
+We support `apple`, `azure`, `bitbucket`, `discord`, `facebook`, `figma`, `github`, `gitlab`, `google`, `keycloak`, `linkedin`, `notion`, `snapchat`, `spotify`, `slack`, `steam`, `twitch`, `twitter` and `workos` for external authentication.
 
 Use the names as the keys underneath `external` to configure each separately.
 
@@ -471,6 +471,16 @@ The base URL used for constructing the URLs to request authorization and access 
 Configuring an external authentication provider causes Auth to make outbound HTTP requests to that provider's authorization, token, and userinfo endpoints. Configuring a provider either via `GOTRUE_EXTERNAL_*` settings or an admin API is an administrative action, and doing so implies trust in the hosts and URLs that will be contacted.
 
 The network Auth runs in should be hardened so these outbound connections cannot reach internal-only resources you don't want exposed, such as `localhost`/loopback addresses or cloud metadata endpoints (e.g. `169.254.169.254`). This matters most for providers with admin-configurable or discoverable endpoints (e.g. custom OAuth/OIDC providers), where a misconfigured or malicious URL could otherwise be used to reach internal infrastructure.
+
+#### Steam OpenID
+
+Steam uses OpenID 2.0 instead of OAuth2, so its configuration differs from the other providers:
+
+- `EXTERNAL_STEAM_CLIENT_ID` is not used — Steam has no OAuth client registration.
+- `EXTERNAL_STEAM_SECRET` is an optional [Steam Web API key](https://steamcommunity.com/dev/apikey) used only to enrich the user profile (persona name, avatar). Without it, users are created with a minimal profile containing just their SteamID.
+- `EXTERNAL_STEAM_REDIRECT_URI` must be the publicly reachable `/callback` URL; Steam requires it to share an origin with the OpenID realm.
+- Steam never provides an email address, so Steam identities are created without one.
+- `EXTERNAL_STEAM_REQUIRED_APP_ID` (optional) restricts login to accounts owning the given Steam app. It requires the Web API key. Note that accounts with a private game library are rejected, since Steam hides their owned games.
 
 #### Apple OAuth
 
