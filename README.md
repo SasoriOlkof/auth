@@ -483,6 +483,17 @@ Steam uses OpenID 2.0 instead of OAuth2, so its configuration differs from the o
 - `EXTERNAL_STEAM_REQUIRED_APP_ID` (optional) restricts login to accounts owning the given Steam app, verified with the authoritative `ISteamUser/CheckAppOwnership` (which works regardless of profile privacy). It requires `EXTERNAL_STEAM_PUBLISHER_KEY`.
 - `EXTERNAL_STEAM_REQUIRE_PERMANENT` (optional; default `false`) accepts any active license. Set to `true` to require genuine permanent ownership, rejecting Family Sharing, free weekends and PC cafés.
 
+Steam also supports **native login** for game clients, without a browser. Set `EXTERNAL_STEAM_APP_ID` (your Steam application ID) and `EXTERNAL_STEAM_TICKET_IDENTITY` (a versioned identity string, e.g. `mygame-auth-v1`, that must match what the game passes to `GetAuthTicketForWebApi`); both require `EXTERNAL_STEAM_PUBLISHER_KEY`. The game then exchanges a session ticket for a Supabase session:
+
+```
+POST /token?grant_type=steam_ticket
+Content-Type: application/json
+
+{ "ticket": "<hex-encoded session ticket>" }
+```
+
+The server verifies the ticket with `ISteamUserAuth/AuthenticateUserTicket` and returns a normal Supabase session (`access_token` + `refresh_token`), resolving to the same `steam` identity (keyed on the SteamID) as the browser flow. If `EXTERNAL_STEAM_REQUIRED_APP_ID` is set, ownership is additionally enforced. `APP_ID` is distinct from `REQUIRED_APP_ID`: it enables ticket authentication, not the ownership gate.
+
 #### Apple OAuth
 
 To try out external authentication with Apple locally, you will need to do the following:
