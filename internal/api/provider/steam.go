@@ -95,6 +95,7 @@ type steamAuthTicketResponse struct {
 	} `json:"response"`
 }
 
+// NewSteamProvider creates a Steam account provider.
 func NewSteamProvider(ext conf.SteamProviderConfiguration) (*SteamProvider, error) {
 	if err := ext.Validate(); err != nil {
 		return nil, err
@@ -112,8 +113,7 @@ func NewSteamProvider(ext conf.SteamProviderConfiguration) (*SteamProvider, erro
 	}, nil
 }
 
-// AuthCodeURL builds the Steam OpenID 2.0 checkid_setup redirect URL, carrying
-// the state through the return_to query string.
+// AuthCodeURL builds the Steam OpenID 2.0 checkid_setup redirect URL.
 func (p *SteamProvider) AuthCodeURL(state string, args ...oauth2.AuthCodeOption) string {
 	callback, err := url.Parse(p.CallbackURL)
 	if err != nil {
@@ -131,8 +131,7 @@ func (p *SteamProvider) AuthCodeURL(state string, args ...oauth2.AuthCodeOption)
 	return p.OpenIDURL + "?" + v.Encode()
 }
 
-// VerifyAssertion validates the OpenID 2.0 assertion from the callback and
-// returns the verified 64-bit SteamID.
+// VerifyAssertion validates the OpenID 2.0 assertion and returns the verified SteamID.
 func (p *SteamProvider) VerifyAssertion(ctx context.Context, params url.Values) (string, error) {
 	mode := params.Get("openid.mode")
 	if mode == "cancel" {
@@ -232,8 +231,7 @@ func (p *SteamProvider) checkAuthentication(ctx context.Context, params url.Valu
 	return errors.New("steam: check_authentication did not validate the assertion")
 }
 
-// OwnsRequiredApp reports whether the account owns RequiredAppID via
-// CheckAppOwnership. Callers should treat errors as a failed check (fail-closed).
+// OwnsRequiredApp reports whether the account owns RequiredAppID (fail-closed on error).
 func (p *SteamProvider) OwnsRequiredApp(ctx context.Context, steamID string) (bool, error) {
 	v := url.Values{}
 	v.Set("key", p.PublisherKey)
@@ -280,8 +278,7 @@ func (p *SteamProvider) parseAppOwnership(raw json.RawMessage) (steamAppOwnershi
 	return single, nil
 }
 
-// AuthenticateUserTicket verifies a hex-encoded Steam session ticket with
-// AuthenticateUserTicket and returns the verified 64-bit SteamID.
+// AuthenticateUserTicket verifies a session ticket and returns the verified SteamID.
 func (p *SteamProvider) AuthenticateUserTicket(ctx context.Context, ticketHex string) (string, error) {
 	if ticketHex == "" {
 		return "", fmt.Errorf("%w: empty ticket", ErrSteamTicketInvalid)
@@ -317,8 +314,7 @@ func (p *SteamProvider) AuthenticateUserTicket(ctx context.Context, ticketHex st
 	return params.SteamID, nil
 }
 
-// GetUserProfile builds the user data for a verified SteamID. Profile
-// enrichment is best effort and falls back to a minimal SteamID-only profile.
+// GetUserProfile returns the user data for a SteamID; profile enrichment is best effort.
 func (p *SteamProvider) GetUserProfile(ctx context.Context, steamID string) *UserProvidedData {
 	data := &UserProvidedData{
 		Metadata: &Claims{
