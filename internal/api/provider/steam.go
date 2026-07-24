@@ -3,12 +3,14 @@ package provider
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -21,42 +23,38 @@ const (
 	defaultSteamCommunityBase  = "steamcommunity.com"
 	defaultSteamPartnerAPIBase = "partner.steam-api.com"
 
-	steamOpenIDPath            = "/openid/login"
-	steamPlayerSummariesPath   = "/ISteamUser/GetPlayerSummaries/v2/"
-	steamCheckAppOwnershipPath = "/ISteamUser/CheckAppOwnership/v4/"
+	steamOpenIDPath                 = "/openid/login"
+	steamPlayerSummariesPath        = "/ISteamUser/GetPlayerSummaries/v2/"
+	steamCheckAppOwnershipPath      = "/ISteamUser/CheckAppOwnership/v4/"
+	steamAuthenticateUserTicketPath = "/ISteamUserAuth/AuthenticateUserTicket/v1/"
+
+	maxSteamTicketHexLen = 8192
 
 	steamOpenIDNS         = "http://specs.openid.net/auth/2.0"
 	steamIdentifierSelect = "http://specs.openid.net/auth/2.0/identifier_select"
 
-	// SteamIssuer is used as the issuer claim for identities created via Steam.
 	SteamIssuer = "https://steamcommunity.com/openid"
 )
 
-// ErrSteamOpenIDCancelled is returned when the user cancels the login on the
-// Steam OpenID page (openid.mode=cancel).
 var ErrSteamOpenIDCancelled = errors.New("steam: OpenID authentication cancelled by user")
 
-// Steam documents the claimed_id as http://steamcommunity.com/openid/id/<id>
-// but currently returns https; accept both schemes since the host is pinned
-// and the value is verified through check_authentication anyway.
+var (
+	ErrSteamTicketInvalid  = errors.New("steam: invalid ticket")
+	ErrSteamTicketRejected = errors.New("steam: ticket rejected")
+)
+
 var steamClaimedIDRegexp = regexp.MustCompile(`^https?://steamcommunity\.com/openid/id/(\d+)$`)
 
-// SteamProvider implements Steam login via OpenID 2.0. Steam has no OAuth2
-// flow: there is no authorization code and no tokens. The user is redirected
-// to the Steam OpenID endpoint and the signed positive assertion returned on
-// the callback is verified server-side with a check_authentication round trip.
-// It intentionally implements only the Provider interface, not OAuthProvider.
+// SteamProvider implements Steam login via OpenID 2.0 and native session tickets.
 type SteamProvider struct {
-	OpenIDURL       string
-	PublisherAPIURL string
-	// PublisherKey is a Steam publisher Web API key that owns RequiredAppID,
-	// used on the partner host for both ownership and profile enrichment.
-	PublisherKey  string
-	CallbackURL   string
-	RequiredAppID string
-	// RequirePermanent requires genuine permanent ownership (excludes Family
-	// Sharing, free weekends and PC cafés).
+	OpenIDURL        string
+	PublisherAPIURL  string
+	PublisherKey     string
+	CallbackURL      string
+	RequiredAppID    string
 	RequirePermanent bool
+	AppID            string
+	TicketIdentity   string
 }
 
 type steamPlayer struct {
@@ -74,42 +72,48 @@ type steamPlayerSummariesResponse struct {
 	} `json:"response"`
 }
 
-// steamAppOwnership is a single CheckAppOwnership record. appid is only present
-// in the array-shaped response variant.
 type steamAppOwnership struct {
 	AppID     json.Number `json:"appid"`
 	OwnsApp   bool        `json:"ownsapp"`
 	Permanent bool        `json:"permanent"`
 }
 
-// steamCheckAppOwnershipResponse defers decoding of the appownership value
-// because Steam has returned it both as a single object and as an object
-// wrapping an "apps" array across API versions.
 type steamCheckAppOwnershipResponse struct {
 	AppOwnership json.RawMessage `json:"appownership"`
 }
 
-// NewSteamProvider creates a Steam provider using OpenID 2.0.
+type steamAuthTicketResponse struct {
+	Response struct {
+		Params *struct {
+			Result  string `json:"result"`
+			SteamID string `json:"steamid"`
+		} `json:"params"`
+		Error *struct {
+			ErrorCode int    `json:"errorcode"`
+			ErrorDesc string `json:"errordesc"`
+		} `json:"error"`
+	} `json:"response"`
+}
+
 func NewSteamProvider(ext conf.SteamProviderConfiguration) (*SteamProvider, error) {
 	if err := ext.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &SteamProvider{
-		OpenIDURL: chooseHost(ext.URL, defaultSteamCommunityBase) + steamOpenIDPath,
-		// Publisher methods live on the partner host in production; tests
-		// override ext.ApiURL so it points at the fake server.
+		OpenIDURL:        chooseHost(ext.URL, defaultSteamCommunityBase) + steamOpenIDPath,
 		PublisherAPIURL:  chooseHost(ext.ApiURL, defaultSteamPartnerAPIBase),
 		PublisherKey:     ext.PublisherKey,
 		CallbackURL:      ext.RedirectURI,
 		RequiredAppID:    ext.RequiredAppID,
 		RequirePermanent: ext.RequirePermanent,
+		AppID:            ext.AppID,
+		TicketIdentity:   ext.TicketIdentity,
 	}, nil
 }
 
-// AuthCodeURL builds the Steam OpenID 2.0 checkid_setup redirect URL. The
-// state is round-tripped through the return_to query string so the callback
-// carries it like a regular OAuth callback would.
+// AuthCodeURL builds the Steam OpenID 2.0 checkid_setup redirect URL, carrying
+// the state through the return_to query string.
 func (p *SteamProvider) AuthCodeURL(state string, args ...oauth2.AuthCodeOption) string {
 	callback, err := url.Parse(p.CallbackURL)
 	if err != nil {
@@ -127,10 +131,8 @@ func (p *SteamProvider) AuthCodeURL(state string, args ...oauth2.AuthCodeOption)
 	return p.OpenIDURL + "?" + v.Encode()
 }
 
-// VerifyAssertion validates the OpenID 2.0 positive assertion returned by
-// Steam on the callback and returns the verified 64-bit SteamID. The
-// check_authentication request is always sent to the configured endpoint,
-// never to the openid.op_endpoint value from the response.
+// VerifyAssertion validates the OpenID 2.0 assertion from the callback and
+// returns the verified 64-bit SteamID.
 func (p *SteamProvider) VerifyAssertion(ctx context.Context, params url.Values) (string, error) {
 	mode := params.Get("openid.mode")
 	if mode == "cancel" {
@@ -174,8 +176,6 @@ func (p *SteamProvider) VerifyAssertion(ctx context.Context, params url.Values) 
 	return matches[1], nil
 }
 
-// verifyReturnTo checks that openid.return_to points at our configured
-// callback and carries the same state as the callback request itself.
 func (p *SteamProvider) verifyReturnTo(params url.Values) error {
 	returnTo, err := url.Parse(params.Get("openid.return_to"))
 	if err != nil {
@@ -194,8 +194,6 @@ func (p *SteamProvider) verifyReturnTo(params url.Values) error {
 	return nil
 }
 
-// checkAuthentication replays the signed assertion to Steam with
-// openid.mode=check_authentication and requires an is_valid:true response.
 func (p *SteamProvider) checkAuthentication(ctx context.Context, params url.Values) error {
 	verification := url.Values{}
 	for key, values := range params {
@@ -234,12 +232,8 @@ func (p *SteamProvider) checkAuthentication(ctx context.Context, params url.Valu
 	return errors.New("steam: check_authentication did not validate the assertion")
 }
 
-// OwnsRequiredApp reports whether the given Steam account owns the configured
-// RequiredAppID, using ISteamUser/CheckAppOwnership on the partner host. It is
-// authoritative (ignores library privacy) and distinguishes genuine permanent
-// ownership from temporary access (Family Sharing, free weekends, PC cafés)
-// via the permanent flag. Callers should treat errors as a failed check
-// (fail-closed) since this is an authorization gate.
+// OwnsRequiredApp reports whether the account owns RequiredAppID via
+// CheckAppOwnership. Callers should treat errors as a failed check (fail-closed).
 func (p *SteamProvider) OwnsRequiredApp(ctx context.Context, steamID string) (bool, error) {
 	v := url.Values{}
 	v.Set("key", p.PublisherKey)
@@ -262,9 +256,6 @@ func (p *SteamProvider) OwnsRequiredApp(ctx context.Context, steamID string) (bo
 	return ownership.OwnsApp, nil
 }
 
-// parseAppOwnership decodes the appownership value, which Steam has returned
-// both as a single object and as an object wrapping an "apps" array. In the
-// array form the entry matching RequiredAppID is selected.
 func (p *SteamProvider) parseAppOwnership(raw json.RawMessage) (steamAppOwnership, error) {
 	if len(raw) == 0 {
 		return steamAppOwnership{}, errors.New("steam: empty appownership in CheckAppOwnership response")
@@ -279,7 +270,6 @@ func (p *SteamProvider) parseAppOwnership(raw json.RawMessage) (steamAppOwnershi
 				return app, nil
 			}
 		}
-		// The array was returned but did not include the requested app.
 		return steamAppOwnership{}, nil
 	}
 
@@ -290,12 +280,45 @@ func (p *SteamProvider) parseAppOwnership(raw json.RawMessage) (steamAppOwnershi
 	return single, nil
 }
 
-// GetUserProfile builds the user data for a verified SteamID. Steam never
-// returns an email address. Profile enrichment via GetPlayerSummaries on the
-// partner host is best effort: when no publisher key is configured or the
-// request fails, a minimal profile derived from the SteamID alone is returned
-// instead of an error, since authentication was already established by the
-// OpenID assertion.
+// AuthenticateUserTicket verifies a hex-encoded Steam session ticket with
+// AuthenticateUserTicket and returns the verified 64-bit SteamID.
+func (p *SteamProvider) AuthenticateUserTicket(ctx context.Context, ticketHex string) (string, error) {
+	if ticketHex == "" {
+		return "", fmt.Errorf("%w: empty ticket", ErrSteamTicketInvalid)
+	}
+	if len(ticketHex) > maxSteamTicketHexLen {
+		return "", fmt.Errorf("%w: ticket exceeds %d characters", ErrSteamTicketInvalid, maxSteamTicketHexLen)
+	}
+	if _, err := hex.DecodeString(ticketHex); err != nil {
+		return "", fmt.Errorf("%w: ticket is not valid hexadecimal", ErrSteamTicketInvalid)
+	}
+
+	v := url.Values{}
+	v.Set("key", p.PublisherKey)
+	v.Set("appid", p.AppID)
+	v.Set("ticket", ticketHex)
+	v.Set("identity", p.TicketIdentity)
+
+	var resp steamAuthTicketResponse
+	if err := p.getJSON(ctx, p.PublisherAPIURL+steamAuthenticateUserTicketPath+"?"+v.Encode(), &resp); err != nil {
+		return "", err
+	}
+
+	if resp.Response.Error != nil {
+		return "", fmt.Errorf("%w: code %d", ErrSteamTicketRejected, resp.Response.Error.ErrorCode)
+	}
+	params := resp.Response.Params
+	if params == nil || !strings.EqualFold(params.Result, "OK") {
+		return "", ErrSteamTicketRejected
+	}
+	if _, err := strconv.ParseUint(params.SteamID, 10, 64); err != nil {
+		return "", errors.New("steam: ambiguous AuthenticateUserTicket response: invalid steamid")
+	}
+	return params.SteamID, nil
+}
+
+// GetUserProfile builds the user data for a verified SteamID. Profile
+// enrichment is best effort and falls back to a minimal SteamID-only profile.
 func (p *SteamProvider) GetUserProfile(ctx context.Context, steamID string) *UserProvidedData {
 	data := &UserProvidedData{
 		Metadata: &Claims{

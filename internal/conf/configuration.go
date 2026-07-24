@@ -612,23 +612,20 @@ type ProviderConfiguration struct {
 	Web3Ethereum EthereumConfiguration `json:"web3_ethereum" split_words:"true"`
 }
 
-// SteamProviderConfiguration holds the configuration for the Steam provider.
-// Steam uses OpenID 2.0 rather than OAuth2, so ClientID and Secret from the
-// embedded OAuthProviderConfiguration are unused; a publisher Web API key is
-// configured via PublisherKey instead.
+// SteamProviderConfiguration configures the Steam provider (OpenID 2.0 and
+// native session tickets). ClientID and Secret from the embedded config are
+// unused; use PublisherKey.
 type SteamProviderConfiguration struct {
 	OAuthProviderConfiguration
-	// PublisherKey is a Steam publisher Web API key that owns RequiredAppID. It
-	// is used on the partner host for both authoritative ownership via
-	// ISteamUser/CheckAppOwnership and profile enrichment. Optional unless
-	// RequiredAppID is set.
+	// PublisherKey is a Steam publisher Web API key that owns the app.
 	PublisherKey string `json:"publisher_key,omitempty" split_words:"true"`
-	// RequiredAppID, if set, rejects logins from Steam accounts that do not
-	// own the given app.
+	// AppID with TicketIdentity enables native session-ticket login.
+	AppID string `json:"app_id,omitempty" split_words:"true"`
+	// TicketIdentity is pinned server-side and matched against the ticket.
+	TicketIdentity string `json:"ticket_identity,omitempty" split_words:"true"`
+	// RequiredAppID, if set, gates login on ownership of the given app.
 	RequiredAppID string `json:"required_app_id,omitempty" split_words:"true"`
-	// RequirePermanent requires genuine permanent ownership (excludes Family
-	// Sharing, free weekends and PC cafés). Defaults to false, so any active
-	// license is accepted.
+	// RequirePermanent requires permanent ownership rather than any active license.
 	RequirePermanent bool `json:"require_permanent,omitempty" split_words:"true"`
 }
 
@@ -1439,9 +1436,6 @@ func (o *OAuthProviderConfiguration) ValidateOAuth() error {
 	return nil
 }
 
-// Validate checks the Steam provider configuration. Unlike ValidateOAuth it
-// does not require a client ID (Steam's OpenID 2.0 flow has none); a publisher
-// Web API key is only required when RequiredAppID is set.
 func (s *SteamProviderConfiguration) Validate() error {
 	if !s.Enabled {
 		return errors.New("provider is not enabled")
@@ -1454,10 +1448,26 @@ func (s *SteamProviderConfiguration) Validate() error {
 			return errors.New("required app ID must be numeric")
 		}
 		if s.PublisherKey == "" {
-			return errors.New("missing Steam publisher Web API key, required when required app ID is set")
+			return errors.New("missing Steam publisher Web API key, required to verify app ownership")
+		}
+	}
+	if s.AppID != "" {
+		if _, err := strconv.ParseUint(s.AppID, 10, 64); err != nil {
+			return errors.New("app ID must be numeric")
+		}
+		if s.TicketIdentity == "" {
+			return errors.New("missing Steam ticket identity, required for native login")
+		}
+		if s.PublisherKey == "" {
+			return errors.New("missing Steam publisher Web API key, required for native login")
 		}
 	}
 	return nil
+}
+
+// NativeEnabled reports whether native Steam ticket login is configured.
+func (s *SteamProviderConfiguration) NativeEnabled() bool {
+	return s.Enabled && s.AppID != "" && s.TicketIdentity != ""
 }
 
 func (t *TwilioProviderConfiguration) Validate() error {
