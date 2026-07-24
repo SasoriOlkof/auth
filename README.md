@@ -494,6 +494,18 @@ Content-Type: application/json
 
 The server verifies the ticket with `ISteamUserAuth/AuthenticateUserTicket` and returns a normal Supabase session (`access_token` + `refresh_token`), resolving to the same `steam` identity (keyed on the SteamID) as the browser flow. If `EXTERNAL_STEAM_REQUIRED_APP_ID` is set, ownership is additionally enforced. `APP_ID` is distinct from `REQUIRED_APP_ID`: it enables ticket authentication, not the ownership gate.
 
+An authenticated user (e.g. a device/anonymous account) can also attach a Steam identity to their existing account, keeping the same user ID so their data is preserved. This requires `GOTRUE_SECURITY_MANUAL_LINKING_ENABLED=true`:
+
+```
+POST /user/identities/steam-ticket
+Authorization: Bearer <access token>
+Content-Type: application/json
+
+{ "ticket": "<hex-encoded session ticket>" }
+```
+
+Linking is idempotent when the Steam account is already linked to the same user, and returns `409 steam_identity_already_linked` when the Steam account belongs to a different user (accounts are not merged automatically).
+
 #### Apple OAuth
 
 To try out external authentication with Apple locally, you will need to do the following:
