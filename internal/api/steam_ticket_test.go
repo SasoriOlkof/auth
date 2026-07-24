@@ -205,3 +205,146 @@ func (ts *ExternalTestSuite) TestSteamTicketGrant_OwnershipGate() {
 	w := ts.postSteamTicket(steamValidTicket)
 	ts.Require().Equal(http.StatusOK, w.Code)
 }
+
+func (ts *ExternalTestSuite) generateAccessTokenAndSession(u *models.User) string {
+	s, err := models.NewSession(u.ID, nil)
+	ts.Require().NoError(err)
+	ts.Require().NoError(ts.API.db.Create(s))
+
+	req := httptest.NewRequest(http.MethodPost, "/token?grant_type=password", nil)
+	token, _, err := ts.API.generateAccessToken(req, ts.API.db, u, &s.ID, models.PasswordGrant)
+	ts.Require().NoError(err)
+	return token
+}
+
+func (ts *ExternalTestSuite) createDeviceUser(email string) *models.User {
+	u, err := models.NewUser("", email, "password", ts.Config.JWT.Aud, nil)
+	ts.Require().NoError(err)
+	ts.Require().NoError(ts.API.db.Create(u))
+	ts.Require().NoError(u.Confirm(ts.API.db))
+	return u
+}
+
+func (ts *ExternalTestSuite) postSteamTicketLink(token, ticket string) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	ts.Require().NoError(json.NewEncoder(&buf).Encode(map[string]string{"ticket": ticket}))
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/user/identities/steam-ticket", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	ts.API.handler.ServeHTTP(w, req)
+	return w
+}
+
+func (ts *ExternalTestSuite) TestSteamTicketLink_CreatesIdentityKeepsUser() {
+	ts.Config.Security.ManualLinkingEnabled = true
+	defer func() { ts.Config.Security.ManualLinkingEnabled = false }()
+	server, _ := ts.setupSteamTicket("OK", steamTestID, false, http.StatusOK)
+	defer server.Close()
+	defer ts.resetSteamNative()
+
+	u := ts.createDeviceUser("device1@example.com")
+	token := ts.generateAccessTokenAndSession(u)
+
+	w := ts.postSteamTicketLink(token, steamValidTicket)
+	ts.Require().Equal(http.StatusOK, w.Code)
+
+	identity := &models.Identity{}
+	ts.Require().NoError(ts.API.db.Q().Where("provider_id = ?", steamTestID).First(identity))
+	ts.Equal(u.ID, identity.UserID)
+	ts.Equal("steam", identity.Provider)
+}
+
+func (ts *ExternalTestSuite) TestSteamTicketLink_Idempotent() {
+	ts.Config.Security.ManualLinkingEnabled = true
+	defer func() { ts.Config.Security.ManualLinkingEnabled = false }()
+	server, _ := ts.setupSteamTicket("OK", steamTestID, false, http.StatusOK)
+	defer server.Close()
+	defer ts.resetSteamNative()
+
+	u := ts.createDeviceUser("device2@example.com")
+	token := ts.generateAccessTokenAndSession(u)
+
+	ts.Require().Equal(http.StatusOK, ts.postSteamTicketLink(token, steamValidTicket).Code)
+	ts.Require().Equal(http.StatusOK, ts.postSteamTicketLink(token, steamValidTicket).Code)
+
+	n, err := ts.API.db.Q().Where("provider = ? and provider_id = ?", "steam", steamTestID).Count(&models.Identity{})
+	ts.Require().NoError(err)
+	ts.Equal(1, n)
+}
+
+func (ts *ExternalTestSuite) TestSteamTicketLink_ConflictWithAnotherUser() {
+	ts.Config.Security.ManualLinkingEnabled = true
+	defer func() { ts.Config.Security.ManualLinkingEnabled = false }()
+	ts.createUserWithIdentity("steam", steamTestID, "", "Steam User", "", "")
+	server, _ := ts.setupSteamTicket("OK", steamTestID, false, http.StatusOK)
+	defer server.Close()
+	defer ts.resetSteamNative()
+
+	u := ts.createDeviceUser("device3@example.com")
+	token := ts.generateAccessTokenAndSession(u)
+
+	w := ts.postSteamTicketLink(token, steamValidTicket)
+	ts.Require().Equal(http.StatusConflict, w.Code)
+	ts.Contains(w.Body.String(), "steam_identity_already_linked")
+}
+
+func (ts *ExternalTestSuite) TestSteamTicketLink_DeAnonymizes() {
+	ts.Config.Security.ManualLinkingEnabled = true
+	defer func() { ts.Config.Security.ManualLinkingEnabled = false }()
+	server, _ := ts.setupSteamTicket("OK", steamTestID, false, http.StatusOK)
+	defer server.Close()
+	defer ts.resetSteamNative()
+
+	u, err := models.NewUser("", "", "", ts.Config.JWT.Aud, nil)
+	ts.Require().NoError(err)
+	u.IsAnonymous = true
+	ts.Require().NoError(ts.API.db.Create(u))
+	token := ts.generateAccessTokenAndSession(u)
+
+	w := ts.postSteamTicketLink(token, steamValidTicket)
+	ts.Require().Equal(http.StatusOK, w.Code)
+
+	updated, err := models.FindUserByID(ts.API.db, u.ID)
+	ts.Require().NoError(err)
+	ts.False(updated.IsAnonymous)
+}
+
+func (ts *ExternalTestSuite) TestSteamTicketLink_InvalidTicket() {
+	ts.Config.Security.ManualLinkingEnabled = true
+	defer func() { ts.Config.Security.ManualLinkingEnabled = false }()
+	server, authCount := ts.setupSteamTicket("OK", steamTestID, false, http.StatusOK)
+	defer server.Close()
+	defer ts.resetSteamNative()
+
+	u := ts.createDeviceUser("device4@example.com")
+	token := ts.generateAccessTokenAndSession(u)
+
+	w := ts.postSteamTicketLink(token, "nothexZZ")
+	ts.Require().Equal(http.StatusBadRequest, w.Code)
+	ts.Equal(0, *authCount)
+}
+
+func (ts *ExternalTestSuite) TestSteamTicketLink_NativeDisabled() {
+	ts.Config.Security.ManualLinkingEnabled = true
+	defer func() { ts.Config.Security.ManualLinkingEnabled = false }()
+	defer ts.resetSteamNative()
+
+	u := ts.createDeviceUser("device5@example.com")
+	token := ts.generateAccessTokenAndSession(u)
+
+	w := ts.postSteamTicketLink(token, steamValidTicket)
+	ts.Require().Equal(http.StatusUnprocessableEntity, w.Code)
+}
+
+func (ts *ExternalTestSuite) TestSteamTicketLink_ManualLinkingDisabled() {
+	server, _ := ts.setupSteamTicket("OK", steamTestID, false, http.StatusOK)
+	defer server.Close()
+	defer ts.resetSteamNative()
+
+	u := ts.createDeviceUser("device6@example.com")
+	token := ts.generateAccessTokenAndSession(u)
+
+	w := ts.postSteamTicketLink(token, steamValidTicket)
+	ts.Require().Equal(http.StatusNotFound, w.Code)
+}

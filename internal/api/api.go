@@ -286,6 +286,7 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 				r.Use(api.requireManualLinkingEnabled)
 				r.Get("/authorize", api.LinkIdentity)
 				r.Delete("/{identity_id}", api.DeleteIdentity)
+				r.Post("/steam-ticket", api.LinkSteamTicketIdentity)
 			})
 
 			// OAuth grant management endpoints

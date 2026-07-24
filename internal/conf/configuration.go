@@ -612,21 +612,15 @@ type ProviderConfiguration struct {
 	Web3Ethereum EthereumConfiguration `json:"web3_ethereum" split_words:"true"`
 }
 
-// SteamProviderConfiguration configures the Steam provider (OpenID 2.0 and
-// native session tickets). ClientID and Secret from the embedded config are
-// unused; use PublisherKey.
+// SteamProviderConfiguration configures the Steam provider (OpenID 2.0 and native session tickets).
 type SteamProviderConfiguration struct {
 	OAuthProviderConfiguration
-	// PublisherKey is a Steam publisher Web API key that owns the app.
 	PublisherKey string `json:"publisher_key,omitempty" split_words:"true"`
-	// AppID with TicketIdentity enables native session-ticket login.
-	AppID string `json:"app_id,omitempty" split_words:"true"`
-	// TicketIdentity is pinned server-side and matched against the ticket.
-	TicketIdentity string `json:"ticket_identity,omitempty" split_words:"true"`
-	// RequiredAppID, if set, gates login on ownership of the given app.
-	RequiredAppID string `json:"required_app_id,omitempty" split_words:"true"`
-	// RequirePermanent requires permanent ownership rather than any active license.
-	RequirePermanent bool `json:"require_permanent,omitempty" split_words:"true"`
+	// AppID enables native session-ticket login; distinct from RequiredAppID.
+	AppID            string `json:"app_id,omitempty" split_words:"true"`
+	TicketIdentity   string `json:"ticket_identity,omitempty" split_words:"true"`
+	RequiredAppID    string `json:"required_app_id,omitempty" split_words:"true"`
+	RequirePermanent bool   `json:"require_permanent,omitempty" split_words:"true"`
 }
 
 type SolanaConfiguration struct {
