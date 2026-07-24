@@ -14,6 +14,7 @@ const (
 	LoginTypeSSO       LoginType = "sso"
 	LoginTypeOAuth     LoginType = "oauth"
 	LoginTypeWeb3      LoginType = "web3"
+	LoginTypeSteam     LoginType = "steam"
 	LoginTypeImplicit  LoginType = "implicit"
 	LoginTypeOIDC      LoginType = "oidc"
 	LoginTypeOTP       LoginType = "otp"

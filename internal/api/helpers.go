@@ -65,6 +65,7 @@ type RequestParams interface {
 		SingleSignOnParams |
 		SmsParams |
 		Web3GrantParams |
+		SteamTicketGrantParams |
 		UserUpdateParams |
 		VerifyFactorParams |
 		VerifyParams |

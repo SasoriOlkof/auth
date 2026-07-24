@@ -61,6 +61,7 @@ const (
 	OAuthProviderAuthorizationCode
 	PasskeyLogin
 	MFARecoveryCode
+	SteamTicket
 )
 
 func (authMethod AuthenticationMethod) IsRecovery() bool {
@@ -110,6 +111,8 @@ func (authMethod AuthenticationMethod) String() string {
 		return "oauth_provider/authorization_code"
 	case PasskeyLogin:
 		return "passkey"
+	case SteamTicket:
+		return "steam/ticket"
 	}
 	return ""
 }
@@ -153,6 +156,8 @@ func ParseAuthenticationMethod(authMethod string) (AuthenticationMethod, error) 
 		return OAuthProviderAuthorizationCode, nil
 	case "passkey":
 		return PasskeyLogin, nil
+	case "steam/ticket":
+		return SteamTicket, nil
 	}
 	return 0, fmt.Errorf("unsupported authentication method %q", authMethod)
 }

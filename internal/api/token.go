@@ -56,6 +56,8 @@ func (a *API) Token(w http.ResponseWriter, r *http.Request) error {
 	case "web3":
 		handler = a.Web3Grant
 		limiter = a.limiterOpts.Web3
+	case "steam_ticket":
+		handler = a.SteamTicketGrant
 	default:
 		return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "unsupported_grant_type")
 	}
