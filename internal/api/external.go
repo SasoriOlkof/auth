@@ -157,6 +157,8 @@ func (a *API) handleOAuthCallback(r *http.Request) (*OAuthProviderData, error) {
 	case TwitterProvider:
 		// future OAuth1.0 providers will use this method
 		oAuthResponseData, err = a.oAuth1Callback(ctx, providerType)
+	case SteamProvider:
+		oAuthResponseData, err = a.steamCallback(ctx, r, providerType)
 	default:
 		oAuthResponseData, err = a.oAuthCallback(ctx, r, providerType)
 	}
@@ -224,10 +226,11 @@ func (a *API) internalExternalProviderCallback(w http.ResponseWriter, r *http.Re
 				return terr
 			}
 		} else {
-			createdUser = true
-			if _, user, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional); terr != nil {
+			var decision models.AccountLinkingDecision
+			if decision, user, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional); terr != nil {
 				return terr
 			}
+			createdUser = decision == models.CreateAccount
 		}
 		if flowState != nil && flowState.IsPKCE() {
 			// PKCE flow: update flow state with user ID and tokens
@@ -676,6 +679,11 @@ func (a *API) Provider(ctx context.Context, name string, scopes string) (provide
 	case SlackOIDCProvider:
 		pConfig = config.External.SlackOIDC
 		p, err = provider.NewSlackOIDCProvider(pConfig, scopes)
+	case SteamProvider:
+		pConfig = config.External.Steam.OAuthProviderConfiguration
+		// Steam's OpenID 2.0 flow never returns an email address
+		pConfig.EmailOptional = true
+		p, err = provider.NewSteamProvider(config.External.Steam)
 	case TwitchProvider:
 		pConfig = config.External.Twitch
 		p, err = provider.NewTwitchProvider(pConfig, scopes)
