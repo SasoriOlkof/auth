@@ -38,6 +38,7 @@ const (
 	ErrorCodeSingleIdentityNotDeletable        ErrorCode = "single_identity_not_deletable"
 	ErrorCodeEmailConflictIdentityNotDeletable ErrorCode = "email_conflict_identity_not_deletable"
 	ErrorCodeIdentityAlreadyExists             ErrorCode = "identity_already_exists"
+	ErrorCodeSteamIdentityAlreadyLinked        ErrorCode = "steam_identity_already_linked"
 	ErrorCodeEmailProviderDisabled             ErrorCode = "email_provider_disabled"
 	ErrorCodePhoneProviderDisabled             ErrorCode = "phone_provider_disabled"
 	ErrorCodeTooManyEnrolledMFAFactors         ErrorCode = "too_many_enrolled_mfa_factors"

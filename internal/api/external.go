@@ -157,6 +157,8 @@ func (a *API) handleOAuthCallback(r *http.Request) (*OAuthProviderData, error) {
 	case TwitterProvider:
 		// future OAuth1.0 providers will use this method
 		oAuthResponseData, err = a.oAuth1Callback(ctx, providerType)
+	case SteamProvider:
+		oAuthResponseData, err = a.steamCallback(ctx, r, providerType)
 	default:
 		oAuthResponseData, err = a.oAuthCallback(ctx, r, providerType)
 	}
@@ -224,10 +226,11 @@ func (a *API) internalExternalProviderCallback(w http.ResponseWriter, r *http.Re
 				return terr
 			}
 		} else {
-			createdUser = true
-			if _, user, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional); terr != nil {
+			var decision models.AccountLinkingDecision
+			if decision, user, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional); terr != nil {
 				return terr
 			}
+			createdUser = decision == models.CreateAccount
 		}
 		if flowState != nil && flowState.IsPKCE() {
 			// PKCE flow: update flow state with user ID and tokens
@@ -676,6 +679,11 @@ func (a *API) Provider(ctx context.Context, name string, scopes string) (provide
 	case SlackOIDCProvider:
 		pConfig = config.External.SlackOIDC
 		p, err = provider.NewSlackOIDCProvider(pConfig, scopes)
+	case SteamProvider:
+		pConfig = config.External.Steam.OAuthProviderConfiguration
+		// Steam's OpenID 2.0 flow never returns an email address
+		pConfig.EmailOptional = true
+		p, err = provider.NewSteamProvider(config.External.Steam)
 	case TwitchProvider:
 		pConfig = config.External.Twitch
 		p, err = provider.NewTwitchProvider(pConfig, scopes)
@@ -736,6 +744,12 @@ func (a *API) loadCustomProvider(ctx context.Context, db *storage.Connection, id
 	// Use provider scopes if not overridden
 	if len(scopeList) == 0 {
 		scopeList = customProvider.Scopes
+	}
+
+	// Fail closed before any request goes out if the provider can't be used
+	// with private_key_jwt right now.
+	if err := checkClientAssertionAvailable(customProvider, &config.Experimental.ClientAssertion); err != nil {
+		return nil, pConfig, err
 	}
 
 	// Decrypt client secret for runtime use
@@ -805,6 +819,15 @@ func (a *API) loadCustomProvider(ctx context.Context, db *storage.Connection, id
 		return nil, pConfig, fmt.Errorf("error creating OIDC provider: %w", err)
 	}
 
+	if customProvider.ClientAuthMethod == models.ClientAuthMethodPrivateKeyJWT {
+		p.UseClientAssertion(
+			a.clientAssertionCache,
+			&config.Experimental.ClientAssertion,
+			clientAssertionRequestFor(customProvider),
+			identifier,
+		)
+	}
+
 	// Build provider configuration
 	pConfig = conf.OAuthProviderConfiguration{
 		Enabled:       true,
@@ -816,6 +839,37 @@ func (a *API) loadCustomProvider(ctx context.Context, db *storage.Connection, id
 	}
 
 	return p, pConfig, nil
+}
+
+// checkClientAssertionAvailable returns an error if customProvider uses
+// private_key_jwt but client assertions are disabled, no signing key is
+// configured, or the provider isn't OIDC.
+func checkClientAssertionAvailable(customProvider *models.CustomOAuthProvider, assertionConfig *conf.ClientAssertionConfiguration) error {
+	if customProvider.ClientAuthMethod != models.ClientAuthMethodPrivateKeyJWT {
+		return nil
+	}
+	if !assertionConfig.Enabled || assertionConfig.SigningKey == nil {
+		return fmt.Errorf("custom provider %s uses private_key_jwt, but client assertions are not enabled", customProvider.Identifier)
+	}
+	if !customProvider.IsOIDC() || customProvider.Issuer == nil {
+		return fmt.Errorf("custom provider %s uses private_key_jwt, which requires an OIDC provider with an issuer", customProvider.Identifier)
+	}
+	return nil
+}
+
+// clientAssertionRequestFor returns the assertion request for a
+// private_key_jwt provider. The audience is the configured override, or the
+// provider's issuer.
+func clientAssertionRequestFor(customProvider *models.CustomOAuthProvider) provider.ClientAssertionRequest {
+	audience := *customProvider.Issuer
+	if customProvider.ClientAssertionAudience != nil && *customProvider.ClientAssertionAudience != "" {
+		audience = *customProvider.ClientAssertionAudience
+	}
+	return provider.ClientAssertionRequest{
+		ProviderID: customProvider.ID.String(),
+		ClientID:   customProvider.ClientID,
+		Audience:   audience,
+	}
 }
 
 func redirectErrors(handler apiHandler, w http.ResponseWriter, r *http.Request, u *url.URL) {

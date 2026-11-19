@@ -382,6 +382,13 @@ func (a *API) recoverVerify(r *http.Request, conn *storage.Connection, user *mod
 				return terr
 			}
 
+			// a password set before the email was confirmed may belong to
+			// someone who doesn't own the email, so it must not survive
+			// confirmation
+			if terr = user.ClearUnconfirmedPassword(tx); terr != nil {
+				return terr
+			}
+
 			if terr = user.Confirm(tx); terr != nil {
 				return terr
 			}
@@ -699,6 +706,10 @@ func (a *API) verifyTokenHash(conn *storage.Connection, params *VerifyParams) (*
 // verifyUserAndToken verifies the token associated to the user based on the verify type
 func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams, aud string) (*models.User, error) {
 	config := a.config
+
+	if config.Experimental.EnableOTTAsSourceOfTruth {
+		return a.verifyUserAndTokenFromOTT(conn, params, aud)
+	}
 
 	var user *models.User
 	var err error

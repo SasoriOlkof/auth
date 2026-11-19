@@ -433,7 +433,7 @@ The default group to assign all new users to.
 
 ### External Authentication Providers
 
-We support `apple`, `azure`, `bitbucket`, `discord`, `facebook`, `figma`, `github`, `gitlab`, `google`, `keycloak`, `linkedin`, `notion`, `snapchat`, `spotify`, `slack`, `twitch`, `twitter` and `workos` for external authentication.
+We support `apple`, `azure`, `bitbucket`, `discord`, `facebook`, `figma`, `github`, `gitlab`, `google`, `keycloak`, `linkedin`, `notion`, `snapchat`, `spotify`, `slack`, `steam`, `twitch`, `twitter` and `workos` for external authentication.
 
 Use the names as the keys underneath `external` to configure each separately.
 
@@ -471,6 +471,40 @@ The base URL used for constructing the URLs to request authorization and access 
 Configuring an external authentication provider causes Auth to make outbound HTTP requests to that provider's authorization, token, and userinfo endpoints. Configuring a provider either via `GOTRUE_EXTERNAL_*` settings or an admin API is an administrative action, and doing so implies trust in the hosts and URLs that will be contacted.
 
 The network Auth runs in should be hardened so these outbound connections cannot reach internal-only resources you don't want exposed, such as `localhost`/loopback addresses or cloud metadata endpoints (e.g. `169.254.169.254`). This matters most for providers with admin-configurable or discoverable endpoints (e.g. custom OAuth/OIDC providers), where a misconfigured or malicious URL could otherwise be used to reach internal infrastructure.
+
+#### Steam OpenID
+
+Steam uses OpenID 2.0 instead of OAuth2, so its configuration differs from the other providers:
+
+- `EXTERNAL_STEAM_CLIENT_ID` and `EXTERNAL_STEAM_SECRET` are not used — Steam has no OAuth client registration. Configure the publisher key below instead.
+- `EXTERNAL_STEAM_REDIRECT_URI` must be the publicly reachable `/callback` URL; Steam requires it to share an origin with the OpenID realm.
+- Steam never provides an email address, so Steam identities are created without one.
+- `EXTERNAL_STEAM_PUBLISHER_KEY` is a Steam **publisher** Web API key that owns the app. It is used on the partner host both to enrich the user profile (persona name, avatar) and, when `EXTERNAL_STEAM_REQUIRED_APP_ID` is set, to verify ownership. It is optional unless a required app ID is configured; without it, users are created with a minimal profile containing just their SteamID.
+- `EXTERNAL_STEAM_REQUIRED_APP_ID` (optional) restricts login to accounts owning the given Steam app, verified with the authoritative `ISteamUser/CheckAppOwnership` (which works regardless of profile privacy). It requires `EXTERNAL_STEAM_PUBLISHER_KEY`.
+- `EXTERNAL_STEAM_REQUIRE_PERMANENT` (optional; default `false`) accepts any active license. Set to `true` to require genuine permanent ownership, rejecting Family Sharing, free weekends and PC cafés.
+
+Steam also supports **native login** for game clients, without a browser. Set `EXTERNAL_STEAM_APP_ID` (your Steam application ID) and `EXTERNAL_STEAM_TICKET_IDENTITY` (a versioned identity string, e.g. `mygame-auth-v1`, that must match what the game passes to `GetAuthTicketForWebApi`); both require `EXTERNAL_STEAM_PUBLISHER_KEY`. The game then exchanges a session ticket for a Supabase session:
+
+```
+POST /token?grant_type=steam_ticket
+Content-Type: application/json
+
+{ "ticket": "<hex-encoded session ticket>" }
+```
+
+The server verifies the ticket with `ISteamUserAuth/AuthenticateUserTicket` and returns a normal Supabase session (`access_token` + `refresh_token`), resolving to the same `steam` identity (keyed on the SteamID) as the browser flow. If `EXTERNAL_STEAM_REQUIRED_APP_ID` is set, ownership is additionally enforced. `APP_ID` is distinct from `REQUIRED_APP_ID`: it enables ticket authentication, not the ownership gate.
+
+An authenticated user (e.g. a device/anonymous account) can also attach a Steam identity to their existing account, keeping the same user ID so their data is preserved. This requires `GOTRUE_SECURITY_MANUAL_LINKING_ENABLED=true`:
+
+```
+POST /user/identities/steam-ticket
+Authorization: Bearer <access token>
+Content-Type: application/json
+
+{ "ticket": "<hex-encoded session ticket>" }
+```
+
+Linking is idempotent when the Steam account is already linked to the same user, and returns `409 steam_identity_already_linked` when the Steam account belongs to a different user (accounts are not merged automatically).
 
 #### Apple OAuth
 
